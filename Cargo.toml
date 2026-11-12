@@ -7,3 +7,14 @@ edition = "2024"
 glam = "0.33"
 rand = "0.10"
 rand_distr = "0.6"
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "height"
+harness = false
+
+[[bench]]
+name = "volume"
+harness = false

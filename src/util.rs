@@ -50,9 +50,10 @@ pub fn rand_normalized_sphere(rng: &mut ThreadRng) -> Vec3 {
     vec3(x, y, z)
 }
 
+// Point on the plane P at height h above the lowest vertex of the cube (along g).
 pub fn get_plane_origin(g: Vec3, h: f32) -> Vec3 {
-    let v = g.signum() * 0.5 + 0.5;
-    v - g * h
+    let v = 0.5 - g.signum() * 0.5;
+    v + g * h
 }
 
 pub fn max_height(g: Vec3) -> f32 {
