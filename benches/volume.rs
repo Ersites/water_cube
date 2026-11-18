@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use criterion::measurement::WallTime;
 use criterion::{
-    BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
+    BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group,
+    criterion_main,
 };
 use glam::{Vec3, vec3};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
@@ -31,7 +32,10 @@ type VolumeFn = fn(Vec3, f32) -> f32;
 const EXACT_3D: [(&str, VolumeFn); 5] = [
     ("exact", exact),
     ("inclusion_exclusion_3d", inclusion_exclusion_3d),
-    ("inclusion_exclusion_3d_unrolled", inclusion_exclusion_3d_unrolled),
+    (
+        "inclusion_exclusion_3d_unrolled",
+        inclusion_exclusion_3d_unrolled,
+    ),
     ("piecewise_3d", piecewise_3d),
     ("piecewise_3d_symmetric", piecewise_3d_symmetric),
 ];
@@ -73,7 +77,9 @@ fn random_inputs(c: &mut Criterion) {
     for (name, f) in EXACT_3D {
         group.bench_function(name, |b| b.iter(|| run_batch(f, &inputs)));
     }
-    group.bench_function("surface_area", |b| b.iter(|| run_batch(surface_area, &inputs)));
+    group.bench_function("surface_area", |b| {
+        b.iter(|| run_batch(surface_area, &inputs))
+    });
     group.finish();
 }
 
@@ -105,7 +111,11 @@ fn by_dimension(c: &mut Criterion) {
     let mut group = c.benchmark_group("by_dimension");
     group.throughput(Throughput::Elements(BATCH as u64));
     configure(&mut group);
-    for (label, mask) in [("3d", vec3(1.0, 1.0, 1.0)), ("2d", vec3(1.0, 0.0, 1.0)), ("1d", vec3(0.0, 0.0, 1.0))] {
+    for (label, mask) in [
+        ("3d", vec3(1.0, 1.0, 1.0)),
+        ("2d", vec3(1.0, 0.0, 1.0)),
+        ("1d", vec3(0.0, 0.0, 1.0)),
+    ] {
         let inputs: Vec<(Vec3, f32)> = (0..BATCH)
             .map(|_| {
                 let g = loop {
@@ -140,9 +150,17 @@ fn monte_carlo_reference(c: &mut Criterion) {
     group.throughput(Throughput::Elements(MC_BATCH as u64));
     group.sample_size(20);
     group.measurement_time(Duration::from_secs(5));
-    group.bench_function("monte_carlo", |b| b.iter(|| run_batch(monte_carlo, &inputs)));
+    group.bench_function("monte_carlo", |b| {
+        b.iter(|| run_batch(monte_carlo, &inputs))
+    });
     group.finish();
 }
 
-criterion_group!(benches, random_inputs, by_height, by_dimension, monte_carlo_reference);
+criterion_group!(
+    benches,
+    random_inputs,
+    by_height,
+    by_dimension,
+    monte_carlo_reference
+);
 criterion_main!(benches);

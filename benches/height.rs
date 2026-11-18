@@ -8,12 +8,13 @@ use std::time::Duration;
 
 use criterion::measurement::WallTime;
 use criterion::{
-    BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
+    BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group,
+    criterion_main,
 };
 use glam::{Vec3, vec3};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
-use water_cube::height::{bisection, newton};
+use water_cube::height::{analytic, bisection, newton};
 use water_cube::util::max_height;
 use water_cube::volume::exact;
 
@@ -26,7 +27,11 @@ const SAMPLES: usize = 20;
 const SEED: u64 = 0x5eed;
 
 type HeightFn = fn(Vec3, f32) -> f32;
-const SOLVERS: [(&str, HeightFn); 2] = [("bisection", bisection), ("newton", newton)];
+const SOLVERS: [(&str, HeightFn); 3] = [
+    ("bisection", bisection),
+    ("newton", newton),
+    ("analytic", analytic),
+];
 
 fn random_g(rng: &mut StdRng) -> Vec3 {
     let normal = Normal::new(0.0, 1.0).unwrap();

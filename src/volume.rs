@@ -10,7 +10,7 @@ use crate::util::{get_plane_origin, rand_from_unit_cube, under_plane};
 
 const MONTE_CARLO_ITERATIONS: i32 = 10_000;
 const ZERO_ONE: [i32; 2] = [0, 1];
-const EPS: f32 = 1e-6;
+pub(crate) const EPS: f32 = 1e-6;
 
 /// Brute-force reference: estimates the volume by sampling random points in the
 /// cube. Standard error is ~0.005 with the current iteration count.
@@ -190,8 +190,9 @@ pub fn piecewise_3d(g: Vec3, h: f32) -> f32 {
 /// The vertex heights are symmetric around s / 2 (x pairs with y + z, y with
 /// x + z, z with x + y), so after reflecting `h` into the lower half only the
 /// first 4 intervals are possible. This avoids the upper polynomials, which
-/// lose precision for small components: the error stays below ~1e-6 for any
-/// `g` with non-zero components. All components must be non-zero.
+/// lose precision for small components, and the `Z` polynomial is expanded
+/// around s / 2 for the same reason: the error stays below ~3e-7 for any `g`
+/// with non-zero components. All components must be non-zero.
 pub fn piecewise_3d_symmetric(g: Vec3, h: f32) -> f32 {
     let g = g.abs();
 
@@ -223,10 +224,14 @@ pub fn piecewise_3d_symmetric(g: Vec3, h: f32) -> f32 {
         let t = x + y;
         (t - d).powi(3) + 3.0 * x * y * (2.0 * d - t)
     } else if x + y > z {
-        // vertex z is under the plane (it comes before x + y)
-        let q = x * x + y * y + z * z;
-        let r = x * x * x + y * y * y + z * z * z;
-        ((-2.0 * d + 3.0 * s) * d - 3.0 * q) * d + r
+        // vertex z is under the plane (it comes before x + y). Expanded around
+        // s / 2, where the volume is 1/2, to avoid cancellation: with
+        // u = d - s / 2 this is 3xyz + u(c - 2u^2), where
+        // c = 3/2 (2(xy + yz + zx) - (x^2 + y^2 + z^2)), written so that it
+        // has no cancellation either.
+        let u = d - 0.5 * s;
+        let c = 1.5 * (x * (2.0 * (y + z) - x) - (z - y) * (z - y));
+        3.0 * x * y * z + u * (c - 2.0 * u * u)
     } else {
         // vertex x + y is under the plane (it comes before z)
         3.0 * x * y * (2.0 * d - x - y)
@@ -369,30 +374,32 @@ pub fn surface_area(g: Vec3, h: f32) -> f32 {
     }
 }
 
+/// Inclusion-exclusion in f64 on the same f32 inputs, accurate enough to serve
+/// as a reference in tests even for small components. All components of `g`
+/// must be non-zero.
+#[cfg(test)]
+pub(crate) fn reference(g: Vec3, h: f32) -> f64 {
+    let g = glam::DVec3::new(g.x as f64, g.y as f64, g.z as f64).abs();
+    let h = h as f64;
+    let mut sum = 0.0;
+    for i in ZERO_ONE {
+        for j in ZERO_ONE {
+            for k in ZERO_ONE {
+                let f = h - i as f64 * g.x - j as f64 * g.y - k as f64 * g.z;
+                let sign = if (i + j + k) % 2 == 0 { 1.0 } else { -1.0 };
+                sum += sign * f.max(0.0).powi(3);
+            }
+        }
+    }
+    sum / (6.0 * g.x * g.y * g.z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::util::{max_height, rand_normalized_gaussian};
-    use glam::{DVec3, vec3};
+    use glam::vec3;
     use rand::RngExt;
-
-    /// Inclusion-exclusion in f64 on the same f32 inputs, accurate enough to
-    /// serve as a reference even for small components.
-    fn reference(g: Vec3, h: f32) -> f64 {
-        let g = DVec3::new(g.x as f64, g.y as f64, g.z as f64).abs();
-        let h = h as f64;
-        let mut sum = 0.0;
-        for i in ZERO_ONE {
-            for j in ZERO_ONE {
-                for k in ZERO_ONE {
-                    let f = h - i as f64 * g.x - j as f64 * g.y - k as f64 * g.z;
-                    let sign = if (i + j + k) % 2 == 0 { 1.0 } else { -1.0 };
-                    sum += sign * f.max(0.0).powi(3);
-                }
-            }
-        }
-        sum / (6.0 * g.x * g.y * g.z)
-    }
 
     #[test]
     fn piecewise_3d_symmetric_matches_exact() {
@@ -422,7 +429,7 @@ mod tests {
 
             let v = piecewise_3d_symmetric(g, h);
             let r = reference(g, h);
-            assert!((v as f64 - r).abs() < 1e-5, "g = {g}, h = {h}: {v} vs {r}");
+            assert!((v as f64 - r).abs() < 1e-6, "g = {g}, h = {h}: {v} vs {r}");
         }
     }
 
