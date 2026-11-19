@@ -61,7 +61,30 @@ let h2 = water_cube::height::analytic(g, 0.25);
 | `WaterCube` (`new`, `set_g`, `volume`, `height`, `surface_area`) | many calls with the same G |
 | `volume::exact(g, h)`, `volume::surface_area(g, h)` | single volume or surface-area calls |
 | `height::analytic(g, v)` | single height calls |
+| `WaterCube::surface_polygon`, `WaterCube::water_polygons` | the water surface, or the whole body of water, as polygons for rendering |
+| `TriangleMesh` | collecting those polygons from many cells into one triangle mesh |
 | `volume::variants`, `height::variants` | alternative implementations, kept for comparison, tests and benchmarks |
+
+### Meshes for rendering
+
+`surface_polygon(h)` gives the water surface in a cell: the plane clipped to
+the cube, a convex polygon with 3 to 6 vertices. `water_polygons(h)` gives the
+whole body of water: the surface plus the wetted parts of the cube's faces,
+up to 7 polygons that form a closed mesh. Coordinates are local to the cell,
+in [0, 1]³. `TriangleMesh` collects the polygons of many cells, each moved to
+its place in the grid, into positions, normals and triangle indices, the
+layout renderers such as Bevy or rerun expect:
+
+```rust
+use water_cube::TriangleMesh;
+
+let mut mesh = TriangleMesh::new();
+for (cell_position, fill) in cells {
+    let h = cube.height(fill);
+    mesh.add_polygon(&cube.surface_polygon(h), cell_position); // surface only
+    // or: mesh.add_water(&cube.water_polygons(h), cell_position);
+}
+```
 
 ### Examples
 
@@ -71,6 +94,7 @@ cargo run --example fill_curve               # volume and surface area against h
 cargo run --example fill_curve -- 0 1 1      # ... for a given up direction
 cargo run --release --example many_cells     # a million cells under changing gravity
 cargo run --release --example monte_carlo    # exact volumes against a Monte Carlo estimate
+cargo run --example mesh_obj                 # water meshes for a grid of cells, as OBJ files
 ```
 
 ### Inputs
@@ -130,6 +154,7 @@ The code is in `src/`:
   alternatives (Monte Carlo, inclusion–exclusion, earlier piecewise versions)
 - `height.rs`: `analytic`; `height/variants.rs`: bisection and Newton's method
 - `cube.rs`: `WaterCube`
+- `mesh.rs`: water surface and body polygons, `TriangleMesh`
 - `util.rs`: helpers such as `max_height` and random directions for tests
 
 ## License
