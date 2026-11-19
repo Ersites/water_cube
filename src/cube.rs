@@ -198,8 +198,11 @@ impl WaterCube {
 
     /// Area of the water surface at height `h`, i.e. dV/dh, as
     /// [`crate::volume::surface_area`].
+    ///
+    /// Branch-free in the same way as [`WaterCube::volume`]: evaluates all
+    /// five lower-half pieces and selects one.
     pub fn surface_area(&self, h: f32) -> f32 {
-        // a NaN height would land in `Xy`, whose area doesn't depend on it
+        // a NaN height would select `Xy`, whose area doesn't depend on it
         if h.is_nan() {
             return h;
         }
@@ -208,23 +211,34 @@ impl WaterCube {
             return 0.0;
         }
 
-        // the area is symmetric around s / 2
+        // the area is symmetric around s / 2, so unlike the volume it needs
+        // no flip afterwards
         let d = if h > 0.5 * self.s { self.s - h } else { h };
-        let (x, t) = (self.x, self.t);
+        let (x, y, z, t) = (self.x, self.y, self.z, self.t);
 
-        match self.interval_of_height(d) {
-            LowerInterval::None => d * d * self.inv_2xyz,
-            LowerInterval::X => (2.0 * d - x) * self.inv_2yz,
-            LowerInterval::Y => {
-                let u = t - d;
-                self.inv_z - u * u * self.inv_2xyz
-            }
-            LowerInterval::Z => {
-                let u = d - 0.5 * self.s;
-                (self.c - 6.0 * u * u) * self.inv_6xyz
-            }
-            LowerInterval::Xy => self.inv_z,
-        }
+        // the derivatives of the pieces of `volume`
+        let none = d * d * self.inv_2xyz;
+        let in_x = (2.0 * d - x) * self.inv_2yz;
+        let u = t - d;
+        let in_y = self.inv_z - u * u * self.inv_2xyz;
+        let w = d - 0.5 * self.s;
+        let in_z = (self.c - 6.0 * w * w) * self.inv_6xyz;
+        let in_xy = self.inv_z;
+
+        // The intervals start at 0 <= x <= y <= min(z, x + y), so each piece
+        // can overwrite the previous one once d reaches its start; this
+        // selects the same piece as `LowerInterval::of_height`. (Selecting
+        // from the last interval back, as in `volume`, compiled the final
+        // select to a branch here: 0.3 misses per call.)
+        let rest = if self.z_before_xy { in_z } else { in_xy };
+        let mut a = none;
+        a = if d >= x { in_x } else { a };
+        a = if d >= y { in_y } else { a };
+        // `|` rather than `||`, as with `&` in `volume`
+        a = if (d >= z) | (d >= t) { rest } else { a };
+        // Assign and return `a` rather than returning the `if` directly: the
+        // direct form compiles to a branch (0.19 misses per call, ~15% slower)
+        a
     }
 
     /// Height at which the volume under the plane is `v`, as
@@ -244,10 +258,6 @@ impl WaterCube {
         } else {
             self.lower_height(v)
         }
-    }
-
-    fn interval_of_height(&self, d: f32) -> LowerInterval {
-        LowerInterval::of_height(self.x, self.y, self.z, d)
     }
 
     /// Interval containing the height with volume `v <= 0.5`, from the stored
