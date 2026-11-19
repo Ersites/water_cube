@@ -4,13 +4,12 @@
 //! All functions return a volume in [0, 1], increasing with `h` from 0 at
 //! `h = 0` to 1 at `h = max_height(g)`.
 
-use glam::{Vec2, Vec3, vec2};
+use glam::Vec3;
 
 use crate::util::{get_plane_origin, rand_from_unit_cube, under_plane};
 
 const MONTE_CARLO_ITERATIONS: i32 = 10_000;
 const ZERO_ONE: [i32; 2] = [0, 1];
-pub(crate) const EPS: f32 = 1e-6;
 
 /// Brute-force reference: estimates the volume by sampling random points in the
 /// cube. Standard error is ~0.005 with the current iteration count.
@@ -49,22 +48,25 @@ pub fn monte_carlo_abs(g: Vec3, h: f32) -> f32 {
     under as f32 / MONTE_CARLO_ITERATIONS as f32
 }
 
-/// Exact volume for any `g`. Mirrors `g` into the positive octant, then picks
-/// the 3D, 2D or 1D formula depending on how many components are non-zero
-/// (a zero component means the problem is constant along that axis).
+/// Exact volume for any non-zero `g`, including components that are zero or
+/// close to zero, with no threshold.
+///
+/// Uses the lower-half polynomials of [`piecewise_3d_symmetric`] (reflecting
+/// `h` with V(h) = 1 - V(s - h)), but instead of dividing the result by 6xyz,
+/// each interval divides only by components that its own range guarantees to
+/// be non-zero, with the other factors cancelled by hand. So the 3D formulas
+/// turn into the 2D and 1D ones as components go to zero, and the error stays
+/// at f32 precision (~3e-7) for every `g`.
 pub fn exact(g: Vec3, h: f32) -> f32 {
-    let g = g.abs();
+    let (x, y, z) = sorted_components(g);
+    let s = x + y + z;
 
-    let nx = (g.x > EPS) as i32;
-    let ny = (g.y > EPS) as i32;
-    let nz = (g.z > EPS) as i32;
+    // V(h) = 1 - V(s - h): evaluate the lower half only
+    let flip = h > 0.5 * s;
+    let d = if flip { s - h } else { h };
 
-    match nx + ny + nz {
-        3 => inclusion_exclusion_3d(g, h),
-        2 => exact_2d(g, h),
-        1 => exact_1d(h),
-        _ => 0.0,
-    }
+    let v = lower_volume(x, y, z, d);
+    if flip { 1.0 - v } else { v }
 }
 
 /// Exact volume via inclusion-exclusion over the 8 cube vertices:
@@ -241,6 +243,83 @@ pub fn piecewise_3d_symmetric(g: Vec3, h: f32) -> f32 {
     if flip { 1.0 - v } else { v }
 }
 
+/// Volume at height `d <= s / 2`, for sorted x <= y <= z, used by [`exact`].
+pub(crate) fn lower_volume(x: f32, y: f32, z: f32, d: f32) -> f32 {
+    let t = x + y;
+    match LowerInterval::of_height(x, y, z, d) {
+        // d < x, so x > 0, and d^3 / x stays small
+        LowerInterval::None => d * d * d / (6.0 * x * y * z),
+        // d < y, so y > 0; x(x^2 - 3dx + 3d^2) / (6xyz) with x cancelled
+        LowerInterval::X => (x * x - 3.0 * d * x + 3.0 * d * d) / (6.0 * y * z),
+        // y <= d < x + y, so x > 0, and u = x + y - d <= x keeps u^3 / x small;
+        // (u^3 + 3xy(2d - t)) / (6xyz) with xy cancelled in the second term
+        LowerInterval::Y => {
+            let u = t - d;
+            u * u * u / (6.0 * x * y * z) + (2.0 * d - t) / (2.0 * z)
+        }
+        // x + y > z >= y, so x > 0; expanded around s / 2 as in
+        // `piecewise_3d_symmetric`
+        LowerInterval::Z => {
+            let u = d - 0.5 * (t + z);
+            let c = 1.5 * (x * (2.0 * (y + z) - x) - (z - y) * (z - y));
+            0.5 + u * (c - 2.0 * u * u) / (6.0 * x * y * z)
+        }
+        // 3xy(2d - t) / (6xyz) with xy cancelled; z is the largest component
+        LowerInterval::Xy => (2.0 * d - t) / (2.0 * z),
+    }
+}
+
+/// The absolute components of `g`, sorted so that x <= y <= z.
+pub(crate) fn sorted_components(g: Vec3) -> (f32, f32, f32) {
+    let g = g.abs();
+    let (mut x, mut y, mut z) = (g.x, g.y, g.z);
+    if x > y {
+        std::mem::swap(&mut x, &mut y);
+    }
+    if y > z {
+        std::mem::swap(&mut y, &mut z);
+    }
+    if x > y {
+        std::mem::swap(&mut x, &mut y);
+    }
+    (x, y, z)
+}
+
+/// Interval of the lower half (d <= s / 2) of the piecewise volume, named
+/// after the highest vertex under the plane, as in [`piecewise_3d`].
+/// Above s / 2 the symmetry V(d) = 1 - V(s - d) maps back into these.
+/// Intervals whose range is empty (for example `X` when x = y) are skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LowerInterval {
+    /// d in [0, x): only the lowest vertex is under the plane
+    None,
+    /// d in [x, y)
+    X,
+    /// d in [y, min(z, x + y))
+    Y,
+    /// d in [z, s / 2], only when x + y > z (vertex z comes before x + y)
+    Z,
+    /// d in [x + y, s / 2], only when x + y <= z (vertex x + y comes before z)
+    Xy,
+}
+
+impl LowerInterval {
+    /// The interval containing height `d <= s / 2`, for sorted x <= y <= z.
+    pub(crate) fn of_height(x: f32, y: f32, z: f32, d: f32) -> Self {
+        if d < x {
+            Self::None
+        } else if d < y {
+            Self::X
+        } else if d < z && d < x + y {
+            Self::Y
+        } else if x + y > z {
+            Self::Z
+        } else {
+            Self::Xy
+        }
+    }
+}
+
 /// Range of `h` between two consecutive vertex heights, named after the highest
 /// vertex under the plane (`X` = vertex at height x, `Xy` = at height x + y, ...).
 #[derive(Debug)]
@@ -286,112 +365,82 @@ fn find_interval(s: f32, p: &[f32; 7], z_before_xy: bool) -> Interval {
     Interval::Xyz
 }
 
-/// Exact volume when exactly one component of `g` is zero: the cube is a square
-/// extruded along that axis, so the volume equals the area under the line.
-fn exact_2d(g: Vec3, h: f32) -> f32 {
-    let r = if g.x < EPS {
-        vec2(g.y, g.z)
-    } else if g.y < EPS {
-        vec2(g.x, g.z)
-    } else {
-        vec2(g.x, g.y)
-    };
-
-    inclusion_exclusion_2d(r, h)
-}
-
-/// Area of the unit square under the line with normal `g` at height `h`, via
-/// inclusion-exclusion over the 4 square vertices. Both components must be
-/// non-zero.
-pub fn inclusion_exclusion_2d(g: Vec2, h: f32) -> f32 {
-    let v = 0.5 - g.signum() * 0.5;
-    let o = v + g * h;
-    let d = g.dot(o);
-
-    let mut sum = 0.0;
-    for i in ZERO_ONE {
-        for j in ZERO_ONE {
-            let f = d - i as f32 * g.x - j as f32 * g.y;
-            sum += (1 - (i + j) % 2 * 2) as f32 * (f.max(0.0) * f.max(0.0));
-        }
-    }
-
-    sum / (2.0 * g.x * g.y)
-}
-
-/// Exact volume when `g` is aligned with an axis: the water fills a slab of
-/// height `h`.
-fn exact_1d(h: f32) -> f32 {
-    h
-}
-
 /// Derivative of [`exact`] with respect to `h`. Because `g` is normalized, this
-/// is the area of the water surface (the plane P clipped to the cube). Uses the
-/// same dispatch as [`exact`], with the inclusion-exclusion sums differentiated
-/// term by term, so it has the same f32 precision limits.
+/// is the area of the water surface (the plane P clipped to the cube). Works
+/// for any non-zero `g` with no threshold: each interval is the derivative of
+/// the corresponding piece of [`exact`] and divides only by components its
+/// range guarantees to be non-zero.
 pub fn surface_area(g: Vec3, h: f32) -> f32 {
-    let g = g.abs();
+    let (x, y, z) = sorted_components(g);
+    let t = x + y;
+    let s = t + z;
 
-    let nx = (g.x > EPS) as i32;
-    let ny = (g.y > EPS) as i32;
-    let nz = (g.z > EPS) as i32;
+    // V(h) = 1 - V(s - h), so dV/dh at h equals dV/dd of the lower half at
+    // d = s - h: the area is symmetric around s / 2
+    let d = if h > 0.5 * s { s - h } else { h };
 
-    match nx + ny + nz {
-        3 => {
-            let mut sum = 0.0;
-            for i in ZERO_ONE {
-                for j in ZERO_ONE {
-                    for k in ZERO_ONE {
-                        let f = h - i as f32 * g.x - j as f32 * g.y - k as f32 * g.z;
-                        let f = f.max(0.0);
-                        sum += (1 - (i + j + k) % 2 * 2) as f32 * f * f;
-                    }
-                }
-            }
-            sum / (2.0 * g.x * g.y * g.z)
+    match LowerInterval::of_height(x, y, z, d) {
+        LowerInterval::None => d * d / (2.0 * x * y * z),
+        LowerInterval::X => (2.0 * d - x) / (2.0 * y * z),
+        LowerInterval::Y => {
+            let u = t - d;
+            1.0 / z - u * u / (2.0 * x * y * z)
         }
-        2 => {
-            // length of the water line in the square, extruded by 1
-            let r = if g.x < EPS {
-                vec2(g.y, g.z)
-            } else if g.y < EPS {
-                vec2(g.x, g.z)
-            } else {
-                vec2(g.x, g.y)
-            };
-
-            let mut sum = 0.0;
-            for i in ZERO_ONE {
-                for j in ZERO_ONE {
-                    let f = h - i as f32 * r.x - j as f32 * r.y;
-                    sum += (1 - (i + j) % 2 * 2) as f32 * f.max(0.0);
-                }
-            }
-            sum / (r.x * r.y)
+        LowerInterval::Z => {
+            let u = d - 0.5 * s;
+            let c = 1.5 * (x * (2.0 * (y + z) - x) - (z - y) * (z - y));
+            (c - 6.0 * u * u) / (6.0 * x * y * z)
         }
-        1 => 1.0,
-        _ => 0.0,
+        LowerInterval::Xy => 1.0 / z,
     }
 }
 
 /// Inclusion-exclusion in f64 on the same f32 inputs, accurate enough to serve
-/// as a reference in tests even for small components. All components of `g`
-/// must be non-zero.
+/// as a reference in tests even for small components. Zero components are
+/// dropped, giving the 2D or 1D formula.
 #[cfg(test)]
 pub(crate) fn reference(g: Vec3, h: f32) -> f64 {
-    let g = glam::DVec3::new(g.x as f64, g.y as f64, g.z as f64).abs();
-    let h = h as f64;
+    reference_inclusion_exclusion(g, h, 0)
+}
+
+/// The derivative of [`reference`] with respect to `h`, i.e. the reference
+/// for the surface area.
+#[cfg(test)]
+pub(crate) fn reference_surface_area(g: Vec3, h: f32) -> f64 {
+    reference_inclusion_exclusion(g, h, 1)
+}
+
+/// `derivative`-th derivative of the volume in f64, for the n non-zero
+/// components c of `g`: the sum over subsets S of the components of
+/// (-1)^|S| max(h - sum(S), 0)^(n - derivative) / ((n - derivative)! prod(c)).
+#[cfg(test)]
+fn reference_inclusion_exclusion(g: Vec3, h: f32, derivative: i32) -> f64 {
+    let c: Vec<f64> = g
+        .abs()
+        .to_array()
+        .iter()
+        .filter(|&&c| c > 0.0)
+        .map(|&c| c as f64)
+        .collect();
+    let n = c.len() as i32;
+    let power = n - derivative;
+    let factorial: f64 = (1..=power).map(|k| k as f64).product();
     let mut sum = 0.0;
-    for i in ZERO_ONE {
-        for j in ZERO_ONE {
-            for k in ZERO_ONE {
-                let f = h - i as f64 * g.x - j as f64 * g.y - k as f64 * g.z;
-                let sign = if (i + j + k) % 2 == 0 { 1.0 } else { -1.0 };
-                sum += sign * f.max(0.0).powi(3);
-            }
-        }
+    for subset in 0..(1 << n) {
+        let f = h as f64
+            - (0..n as usize)
+                .filter(|i| subset >> i & 1 == 1)
+                .map(|i| c[i])
+                .sum::<f64>();
+        let sign = if (subset as u32).count_ones().is_multiple_of(2) {
+            1.0
+        } else {
+            -1.0
+        };
+        // max(f, 0)^0 is the step function
+        sum += sign * if f > 0.0 { f.powi(power) } else { 0.0 };
     }
-    sum / (6.0 * g.x * g.y * g.z)
+    sum / (factorial * c.iter().product::<f64>())
 }
 
 #[cfg(test)]
@@ -406,13 +455,10 @@ mod tests {
         let mut rng = rand::rng();
         for _ in 0..10_000 {
             let g = rand_normalized_gaussian(&mut rng);
-            // `exact` is only accurate when no component is small
-            if g.abs().min_element() < 0.1 {
-                continue;
-            }
             let h = rng.random::<f32>() * max_height(g);
             let (a, b) = (piecewise_3d_symmetric(g, h), exact(g, h));
-            assert!((a - b).abs() < 1e-4, "g = {g}, h = {h}: {a} vs {b}");
+            // both are within ~3e-7 of the f64 reference
+            assert!((a - b).abs() < 1e-6, "g = {g}, h = {h}: {a} vs {b}");
         }
     }
 
@@ -440,5 +486,85 @@ mod tests {
         assert!((piecewise_3d_symmetric(g, max_height(g)) - 1.0).abs() < 1e-6);
         // the plane through the cube's center halves it
         assert!((piecewise_3d_symmetric(g, 0.5 * max_height(g)) - 0.5).abs() < 1e-6);
+    }
+
+    /// A random normal whose smallest component is set to `smallest` (with a
+    /// random sign) before normalizing; `None` leaves it unchanged.
+    fn normal_with_smallest(rng: &mut rand::rngs::ThreadRng, smallest: Option<f32>) -> Vec3 {
+        let mut g = rand_normalized_gaussian(rng);
+        if let Some(c) = smallest {
+            let i = g.abs().min_position();
+            g[i] = if rng.random::<bool>() { c } else { -c };
+        }
+        g.normalize()
+    }
+
+    /// Smallest components to test: none, log-uniform in [1e-8, 1e-2), and 0.
+    fn smallest_components(rng: &mut rand::rngs::ThreadRng) -> [Option<f32>; 3] {
+        [
+            None,
+            Some(10f32.powf(-8.0 + 6.0 * rng.random::<f32>())),
+            Some(0.0),
+        ]
+    }
+
+    #[test]
+    fn exact_is_accurate_for_any_g() {
+        let mut rng = rand::rng();
+        for _ in 0..5_000 {
+            for smallest in smallest_components(&mut rng) {
+                let g = normal_with_smallest(&mut rng, smallest);
+                let h = rng.random::<f32>() * max_height(g);
+                let (v, r) = (exact(g, h), reference(g, h));
+                assert!((v as f64 - r).abs() < 1e-6, "g = {g}, h = {h}: {v} vs {r}");
+            }
+        }
+    }
+
+    #[test]
+    fn exact_axis_aligned() {
+        for g in [
+            vec3(0.0, 0.0, 1.0),
+            vec3(-1.0, 0.0, 0.0),
+            vec3(0.0, 1.0, 0.0),
+        ] {
+            for i in 0..=100 {
+                let h = i as f32 / 100.0;
+                assert!((exact(g, h) - h).abs() < 1e-6, "g = {g}, h = {h}");
+            }
+        }
+    }
+
+    #[test]
+    fn exact_is_continuous_as_a_component_goes_to_zero() {
+        let mut rng = rand::rng();
+        for _ in 0..10_000 {
+            let g = rand_normalized_gaussian(&mut rng);
+            let i = g.abs().min_position();
+            let (mut zero, mut tiny) = (g, g);
+            zero[i] = 0.0;
+            tiny[i] = 1e-7;
+            let (zero, tiny) = (zero.normalize(), tiny.normalize());
+            let h = rng.random::<f32>() * max_height(zero);
+            let jump = (exact(zero, h) - exact(tiny, h)).abs();
+            assert!(jump < 1e-6, "g = {zero}, h = {h}: jump {jump}");
+        }
+    }
+
+    #[test]
+    fn surface_area_is_accurate_for_any_g() {
+        let mut rng = rand::rng();
+        for _ in 0..5_000 {
+            for smallest in smallest_components(&mut rng) {
+                let g = normal_with_smallest(&mut rng, smallest);
+                let h = rng.random::<f32>() * max_height(g);
+                let (a, r) = (surface_area(g, h), reference_surface_area(g, h));
+                // relative: the area is up to ~1.7, and grows like 1/z
+                assert!(
+                    (a as f64 - r).abs() < 1e-5 * r.max(1.0),
+                    "g = {g}, h = {h}: {a} vs {r}"
+                );
+            }
+        }
     }
 }
