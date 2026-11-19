@@ -1,6 +1,7 @@
 use rand::RngExt;
 use water_cube::util::{max_height, rand_normalized_gaussian};
-use water_cube::volume::{exact, monte_carlo};
+use water_cube::volume::exact;
+use water_cube::volume::variants::monte_carlo;
 
 fn main() {
     let mut rng = rand::rng();

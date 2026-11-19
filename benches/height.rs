@@ -14,7 +14,8 @@ use criterion::{
 use glam::{Vec3, vec3};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
-use water_cube::height::{analytic, bisection, newton};
+use water_cube::height::analytic;
+use water_cube::height::variants::{bisection, newton};
 use water_cube::util::max_height;
 use water_cube::volume::exact;
 

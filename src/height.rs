@@ -1,113 +1,30 @@
 //! Functions used to calculate the height of the plane under which there is a
 //! given volume, i.e. the inverse of the functions in [`crate::volume`].
 //!
-//! All functions take a normal `g` and a volume `v` in [0, 1] and return the
-//! height `h` in [0, `max_height(g)`] measured from the lowest vertex (see
-//! README).
+//! Use [`analytic`]. The [`variants`] module keeps the iterative solvers
+//! (bisection and Newton's method) for comparison and testing.
+//!
+//! # Inputs
+//!
+//! - `g` must be non-zero and should be normalized, as in [`crate::volume`].
+//! - `v` should be in [0, 1]. Below 0 the height is 0 and above 1 it is
+//!   `max_height(g)`. For [`analytic`], a NaN volume gives NaN.
+//!
+//! The height is returned in [0, `max_height(g)`], measured from the lowest
+//! vertex (see README).
+
+pub mod variants;
 
 use glam::Vec3;
 
-use crate::util::max_height;
-use crate::volume::{LowerInterval, exact, sorted_components, surface_area};
+use crate::volume::{LowerInterval, sorted_components};
 
-const BISECTION_MAX_ITERATIONS: i32 = 64;
-const BISECTION_TOLERANCE: f32 = 1e-6;
-const NEWTON_MAX_ITERATIONS: i32 = 32;
-const NEWTON_TOLERANCE: f32 = 1e-6;
-
-/// Finds `h` such that `exact(g, h) == v` by bisection on [0, `max_height(g)`].
-/// Always converges because the volume is continuous and increasing in `h`,
-/// but needs ~20 evaluations of [`exact`] to get within the tolerance.
-pub fn bisection(g: Vec3, v: f32) -> f32 {
-    let max_h = max_height(g);
-
-    // The volume is flat near both ends (cubic in the distance to the
-    // vertex), so tiny f32 errors in `exact` would move the solution a lot.
-    // Return the endpoints exactly instead.
-    if v <= 0.0 {
-        return 0.0;
-    }
-    if v >= 1.0 {
-        return max_h;
-    }
-
-    let mut lo = 0.0;
-    let mut hi = max_h;
-
-    for _ in 0..BISECTION_MAX_ITERATIONS {
-        if hi - lo < BISECTION_TOLERANCE {
-            break;
-        }
-
-        let mid = 0.5 * (lo + hi);
-        if exact(g, mid) < v {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-
-    0.5 * (lo + hi)
-}
-
-/// Finds `h` such that `exact(g, h) == v` by Newton's method, using
-/// [`surface_area`] as dV/dh. The volume is flat at both ends (convex then
-/// concave), so plain Newton can overshoot; a bisection bracket is kept and a
-/// bisection step is taken whenever the Newton step would leave it.
-pub fn newton(g: Vec3, v: f32) -> f32 {
-    let max_h = max_height(g);
-
-    // same reasoning as in `bisection`
-    if v <= 0.0 {
-        return 0.0;
-    }
-    if v >= 1.0 {
-        return max_h;
-    }
-
-    let mut lo = 0.0;
-    let mut hi = max_h;
-    let mut h = v * max_h;
-
-    for _ in 0..NEWTON_MAX_ITERATIONS {
-        let f = exact(g, h) - v;
-
-        if f < 0.0 {
-            lo = h;
-        } else {
-            hi = h;
-        }
-
-        let step = f / surface_area(g, h);
-
-        // Check convergence before the bracket test: once converged, h is
-        // one of the bracket ends and a tiny (or zero) step lands on it,
-        // which would otherwise be rejected in favour of a bisection step.
-        // A NaN step (zero derivative) fails this test and gets bisected.
-        if step.abs() < NEWTON_TOLERANCE {
-            return h - step;
-        }
-
-        let mut next = h - step;
-        if !(next > lo && next < hi) {
-            next = 0.5 * (lo + hi);
-        }
-        h = next;
-
-        if hi - lo < NEWTON_TOLERANCE {
-            break;
-        }
-    }
-
-    h
-}
-
-/// Finds `h` such that `exact(g, h) == v` in closed form, for any non-zero
+/// Finds `h` such that `volume::exact(g, h) == v` in closed form, for any non-zero
 /// `g`: finds the interval of the piecewise volume containing the answer, then
 /// solves that piece's polynomial directly (cube root, quadratic, linear or
 /// cubic formula). Takes the same steps for every input, with no iteration.
 ///
-/// Like [`exact`], it never divides by a component that can be zero, so it
+/// Like [`crate::volume::exact`], it never divides by a component that can be zero, so it
 /// needs no threshold for small components: with x = 0 the `X` and `Xy`
 /// solutions become the 2D ones, and with x = y = 0 only `Xy` remains, giving
 /// h = v.
@@ -137,7 +54,7 @@ pub fn analytic(g: Vec3, v: f32) -> f32 {
 /// Finds the interval containing the height with volume `v <= 0.5`, for
 /// sorted x <= y <= z. The volume increases with the height, so this compares
 /// `v` with the volume at the end of each interval, using the polynomials of
-/// [`exact`] written so that no component that can be zero is divided by. The
+/// [`crate::volume::exact`] written so that no component that can be zero is divided by. The
 /// end of an empty interval (x = 0 or y = 0) gets volume 0, so it is skipped.
 fn lower_interval(x: f32, y: f32, z: f32, v: f32) -> LowerInterval {
     // end of `None` at d = x: x^3 / (6xyz) with x cancelled
@@ -224,31 +141,10 @@ fn middle_cubic_root(a: f32, q: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::rand_normalized_gaussian;
-    use crate::volume::{lower_volume, reference};
+    use crate::util::{max_height, rand_normalized_gaussian};
+    use crate::volume::{lower_volume, normal_with_smallest, reference, smallest_components};
     use glam::vec3;
     use rand::RngExt;
-
-    /// A random normal with its smallest component set to `smallest`, if
-    /// given, before normalizing.
-    fn normal_with_smallest(rng: &mut rand::rngs::ThreadRng, smallest: Option<f32>) -> Vec3 {
-        let mut g = rand_normalized_gaussian(rng);
-        if let Some(c) = smallest {
-            let i = g.abs().min_position();
-            g[i] = c;
-        }
-        g.normalize()
-    }
-
-    /// Smallest components to test: unchanged, log-uniform in [1e-8, 1e-2),
-    /// and exactly 0.
-    fn smallest_components(rng: &mut rand::rngs::ThreadRng) -> [Option<f32>; 3] {
-        [
-            None,
-            Some(10f32.powf(-8.0 + 6.0 * rng.random::<f32>())),
-            Some(0.0),
-        ]
-    }
 
     /// Distance from `d` to the nearest breakpoint of the lower half.
     fn distance_to_breakpoint(x: f32, y: f32, z: f32, d: f32) -> f32 {
@@ -340,88 +236,6 @@ mod tests {
         assert!(both[0] > 0 && both[1] > 0, "{both:?}");
     }
 
-    #[test]
-    fn bisection_inverts_volume() {
-        let mut rng = rand::rng();
-        for _ in 0..1000 {
-            for smallest in smallest_components(&mut rng) {
-                let g = normal_with_smallest(&mut rng, smallest);
-                let v = rng.random::<f32>();
-                let h = bisection(g, v);
-
-                assert!((0.0..=max_height(g)).contains(&h));
-                // compare volumes, not heights: near h = 0 and h = max_height
-                // the volume is flat, so a tiny volume error is a large height
-                // error
-                assert!((exact(g, h) - v).abs() < 1e-5, "g = {g}, v = {v}, h = {h}");
-            }
-        }
-    }
-
-    #[test]
-    fn bisection_edge_cases() {
-        let g = vec3(1.0, 2.0, 3.0).normalize();
-        assert!(bisection(g, 0.0) < 1e-5);
-        assert!((bisection(g, 1.0) - max_height(g)).abs() < 1e-5);
-
-        // axis-aligned g: h == v
-        let g = vec3(0.0, 0.0, -1.0);
-        assert!((bisection(g, 0.3) - 0.3).abs() < 1e-5);
-    }
-
-    #[test]
-    fn newton_inverts_volume() {
-        let mut rng = rand::rng();
-        for _ in 0..1000 {
-            for smallest in smallest_components(&mut rng) {
-                let g = normal_with_smallest(&mut rng, smallest);
-                let v = rng.random::<f32>();
-                let h = newton(g, v);
-
-                assert!((0.0..=max_height(g)).contains(&h));
-                assert!((exact(g, h) - v).abs() < 1e-5, "g = {g}, v = {v}, h = {h}");
-            }
-        }
-    }
-
-    #[test]
-    fn newton_edge_cases() {
-        let g = vec3(1.0, 2.0, 3.0).normalize();
-        assert_eq!(newton(g, 0.0), 0.0);
-        assert_eq!(newton(g, 1.0), max_height(g));
-
-        // axis-aligned and 2D g
-        let g = vec3(0.0, 0.0, -1.0);
-        assert!((newton(g, 0.3) - 0.3).abs() < 1e-5);
-        let g = vec3(1.0, 0.0, 1.0).normalize();
-        assert!((exact(g, newton(g, 0.3)) - 0.3).abs() < 1e-5);
-    }
-
-    #[test]
-    fn surface_area_is_volume_derivative() {
-        let mut rng = rand::rng();
-        let dh = 1e-3;
-        for _ in 0..1000 {
-            for smallest in smallest_components(&mut rng) {
-                let g = normal_with_smallest(&mut rng, smallest);
-                // The area has kinks with slopes up to ~1/(yz), with y the
-                // second smallest component (with a zero component the volume
-                // is only once differentiable). A central difference across a
-                // kink is off by ~dh / (4yz), so this needs y not too small.
-                // `surface_area` itself is checked for every g against the
-                // exact f64 derivative in
-                // `volume::tests::surface_area_is_accurate_for_any_g`.
-                if sorted_components(g).1 < 0.2 {
-                    continue;
-                }
-                let h = dh + rng.random::<f32>() * (max_height(g) - 2.0 * dh);
-                let fd = (exact(g, h + dh) - exact(g, h - dh)) / (2.0 * dh);
-                let a = surface_area(g, h);
-                assert!((a - fd).abs() < 1e-2, "g = {g}, h = {h}: {a} vs {fd}");
-            }
-        }
-    }
-
     /// Checks that `analytic(g, v)` has volume `v` against the f64 reference,
     /// which handles zero components and is independent of the f32 rounding
     /// of the volume functions.
@@ -496,7 +310,7 @@ mod tests {
                 let g = normal_with_smallest(&mut rng, smallest);
                 // away from the flat ends, where heights are well defined
                 let v = 0.05 + 0.9 * rng.random::<f32>();
-                let (a, b) = (analytic(g, v), bisection(g, v));
+                let (a, b) = (analytic(g, v), variants::bisection(g, v));
                 assert!((a - b).abs() < 1e-4, "g = {g}, v = {v}: {a} vs {b}");
             }
         }

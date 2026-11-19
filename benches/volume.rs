@@ -15,10 +15,11 @@ use glam::{Vec3, vec3};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
 use water_cube::util::max_height;
-use water_cube::volume::{
-    exact, inclusion_exclusion_3d, inclusion_exclusion_3d_unrolled, monte_carlo, piecewise_3d,
-    piecewise_3d_symmetric, surface_area,
+use water_cube::volume::variants::{
+    inclusion_exclusion_3d, inclusion_exclusion_3d_unrolled, monte_carlo, piecewise_3d,
+    piecewise_3d_symmetric,
 };
+use water_cube::volume::{exact, surface_area};
 
 /// Number of distinct inputs per batch. Must be large enough that the branch
 /// predictor can't memorize the sequence of inputs: with ~4k repeated inputs
